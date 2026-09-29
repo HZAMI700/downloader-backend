@@ -1,5 +1,4 @@
 import express, { Request, Response, NextFunction } from 'express';
-import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import { config } from './config.js';
@@ -8,6 +7,7 @@ import { healthRouter } from './routes/health.routes.js';
 import { mediaRouter } from './routes/media.routes.js';
 import { CleanupService } from './services/cleanup.service.js';
 import { getSystemHealth } from './services/binaryChecker.service.js';
+import { BinaryManager } from './services/binaryManager.service.js';
 
 const app = express();
 
@@ -18,34 +18,30 @@ app.use(
   })
 );
 
-// CORS configuration
-const corsOptions: cors.CorsOptions = {
-  origin: (origin, callback) => {
-    // Allow requests with no origin (like mobile apps, curl, postman)
-    if (!origin) return callback(null, true);
+// Robust Universal CORS Middleware
+// Supports Vercel preview URLs, production domains, localhost, and handles preflight OPTIONS with 204
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const origin = (req.headers.origin as string) || '*';
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, HEAD');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Content-Type, Authorization, Range, X-Airo-Share-Token, airo-share-token, X-Requested-With'
+  );
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader(
+    'Access-Control-Expose-Headers',
+    'Content-Disposition, Content-Length, Content-Range'
+  );
+  res.setHeader('Access-Control-Max-Age', '86400');
 
-    if (config.allowedOrigins.includes('*') || config.allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
+  if (req.method === 'OPTIONS') {
+    res.status(204).end();
+    return;
+  }
+  next();
+});
 
-    // Also match any vercel.app preview domain if allowedOrigins has vercel.app
-    const isVercelAllowed = config.allowedOrigins.some(
-      (allowed) => allowed.includes('vercel.app') && origin.endsWith('.vercel.app')
-    );
-    if (isVercelAllowed) {
-      return callback(null, true);
-    }
-
-    logger.warn(`Blocked by CORS: origin ${origin}`);
-    callback(new Error(`Origin ${origin} not allowed by CORS`));
-  },
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Range'],
-  exposedHeaders: ['Content-Disposition', 'Content-Length', 'Content-Range'],
-  credentials: true,
-};
-
-app.use(cors(corsOptions));
 app.use(morgan('combined'));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
@@ -89,34 +85,43 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
 // Initialize cleanup service
 CleanupService.init();
 
-// Start HTTP server
-const server = app.listen(config.port, async () => {
-  logger.info(`Server running on port ${config.port} in ${config.nodeEnv} mode`);
-  
-  // Perform startup health check log
+// Initialize binaries on boot and start server
+async function startServer() {
+  logger.info('Initializing binary dependencies...');
   try {
-    const health = await getSystemHealth();
-    logger.info(`System Status: ${health.status.toUpperCase()}`);
-    logger.info(`  yt-dlp: ${health.ytdlp.available ? `✓ ${health.ytdlp.version}` : '✗ Missing'}`);
-    logger.info(`  FFmpeg: ${health.ffmpeg.available ? `✓ ${health.ffmpeg.version}` : '✗ Missing'}`);
-    logger.info(`  Deno:   ${health.deno.available ? `✓ ${health.deno.version}` : '✗ Missing'}`);
-    logger.info(`  yt-dlp-ejs (YouTube Challenge Solver): ${health.ytdlpEjsSupported ? '✓ Active' : '✗ Inactive'}`);
+    await BinaryManager.init();
   } catch (err) {
-    logger.warn('Initial health check failed:', err);
+    logger.warn('Binary manager initialization warning:', err);
   }
-});
 
-// Graceful shutdown
-const handleShutdown = (signal: string) => {
-  logger.info(`Received ${signal}. Shutting down gracefully...`);
-  CleanupService.stop();
-  server.close(() => {
-    logger.info('HTTP server closed.');
-    process.exit(0);
+  const server = app.listen(config.port, async () => {
+    logger.info(`Server running on port ${config.port} in ${config.nodeEnv} mode`);
+
+    try {
+      const health = await getSystemHealth();
+      logger.info(`System Status: ${health.status.toUpperCase()}`);
+      logger.info(`  yt-dlp: ${health.ytdlp.available ? `✓ ${health.ytdlp.version}` : '✗ Missing'}`);
+      logger.info(`  FFmpeg: ${health.ffmpeg.available ? `✓ ${health.ffmpeg.version}` : '✗ Missing'}`);
+      logger.info(`  Deno:   ${health.deno.available ? `✓ ${health.deno.version}` : '✗ Missing'}`);
+      logger.info(`  yt-dlp-ejs (YouTube Challenge Solver): ${health.ytdlpEjsSupported ? '✓ Active' : '✗ Inactive'}`);
+    } catch (err) {
+      logger.warn('Initial health check failed:', err);
+    }
   });
-};
 
-process.on('SIGINT', () => handleShutdown('SIGINT'));
-process.on('SIGTERM', () => handleShutdown('SIGTERM'));
+  const handleShutdown = (signal: string) => {
+    logger.info(`Received ${signal}. Shutting down gracefully...`);
+    CleanupService.stop();
+    server.close(() => {
+      logger.info('HTTP server closed.');
+      process.exit(0);
+    });
+  };
+
+  process.on('SIGINT', () => handleShutdown('SIGINT'));
+  process.on('SIGTERM', () => handleShutdown('SIGTERM'));
+}
+
+startServer();
 
 export default app;

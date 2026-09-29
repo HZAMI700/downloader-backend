@@ -1,5 +1,6 @@
 import { spawn } from 'child_process';
 import { config } from '../config.js';
+import { BinaryManager } from './binaryManager.service.js';
 
 export interface BinaryStatus {
   available: boolean;
@@ -38,9 +39,7 @@ function runCommandOutput(command: string, args: string[], timeoutMs = 8000): Pr
         isSettled = true;
         try {
           child.kill('SIGTERM');
-        } catch {
-          // ignore
-        }
+        } catch {}
         resolve({ stdout, stderr: stderr + '\nCommand timed out', exitCode: -1 });
       }
     }, timeoutMs);
@@ -72,7 +71,8 @@ function runCommandOutput(command: string, args: string[], timeoutMs = 8000): Pr
 }
 
 export async function checkYtDlp(): Promise<BinaryStatus> {
-  const binary = config.ytdlpPath || 'yt-dlp';
+  const binaries = BinaryManager.get();
+  const binary = binaries.ytdlpPath || config.ytdlpPath || 'yt-dlp';
   try {
     const res = await runCommandOutput(binary, ['--version']);
     if (res.exitCode === 0 && res.stdout.trim()) {
@@ -99,7 +99,8 @@ export async function checkYtDlp(): Promise<BinaryStatus> {
 }
 
 export async function checkFfmpeg(): Promise<BinaryStatus> {
-  const binary = config.ffmpegPath || 'ffmpeg';
+  const binaries = BinaryManager.get();
+  const binary = binaries.ffmpegPath || config.ffmpegPath || 'ffmpeg';
   try {
     const res = await runCommandOutput(binary, ['-version']);
     if (res.exitCode === 0 && res.stdout.includes('ffmpeg version')) {
@@ -127,7 +128,8 @@ export async function checkFfmpeg(): Promise<BinaryStatus> {
 }
 
 export async function checkDeno(): Promise<BinaryStatus> {
-  const binary = config.denoPath || 'deno';
+  const binaries = BinaryManager.get();
+  const binary = binaries.denoPath || config.denoPath || 'deno';
   try {
     const res = await runCommandOutput(binary, ['--version']);
     if (res.exitCode === 0 && res.stdout.includes('deno')) {

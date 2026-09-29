@@ -5,6 +5,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 import { sanitizeFilename } from '../utils/validator.js';
+import { BinaryManager } from './binaryManager.service.js';
 
 export interface VideoFormatOption {
   formatId: string;
@@ -53,16 +54,18 @@ export class YtDlpService {
    */
   private static getBaseArgs(): string[] {
     const args: string[] = [];
+    const binaries = BinaryManager.get();
 
     // Ensure yt-dlp knows where FFmpeg is
-    const ffmpegTarget = config.ffmpegDir || config.ffmpegPath;
+    const ffmpegTarget = binaries.ffmpegDir || binaries.ffmpegPath || config.ffmpegDir || config.ffmpegPath;
     if (ffmpegTarget) {
       args.push('--ffmpeg-location', ffmpegTarget);
     }
 
     // Enable Deno as JavaScript runtime for solving YouTube EJS challenges
-    if (config.denoPath) {
-      args.push('--js-runtimes', `deno:${config.denoPath}`);
+    const denoTarget = binaries.denoPath || config.denoPath;
+    if (denoTarget) {
+      args.push('--js-runtimes', `deno:${denoTarget}`);
     } else {
       args.push('--js-runtimes', 'deno');
     }
@@ -84,10 +87,16 @@ export class YtDlpService {
     return args;
   }
 
+  private static getYtdlpExecutable(): string {
+    const binaries = BinaryManager.get();
+    return binaries.ytdlpPath || config.ytdlpPath || 'yt-dlp';
+  }
+
   /**
    * Extracts video info without downloading
    */
   public static async getVideoInfo(url: string, platform: 'youtube' | 'instagram'): Promise<VideoMetadata> {
+    const executable = this.getYtdlpExecutable();
     const args = [
       ...this.getBaseArgs(),
       '--dump-single-json',
@@ -95,14 +104,14 @@ export class YtDlpService {
       url,
     ];
 
-    logger.info(`Extracting info for URL: ${url} (platform: ${platform})`);
+    logger.info(`Extracting info using ${executable} for URL: ${url} (platform: ${platform})`);
 
     return new Promise((resolve, reject) => {
       let stdout = '';
       let stderr = '';
       let isSettled = false;
 
-      const child = spawn(config.ytdlpPath, args, { shell: false });
+      const child = spawn(executable, args, { shell: false });
 
       // Max timeout for extraction (45 seconds)
       const timer = setTimeout(() => {
@@ -129,7 +138,7 @@ export class YtDlpService {
         if (!isSettled) {
           isSettled = true;
           clearTimeout(timer);
-          reject(new Error(`Failed to spawn yt-dlp: ${err.message}`));
+          reject(new Error(`Failed to spawn yt-dlp (${executable}): ${err.message}`));
         }
       });
 
@@ -140,7 +149,6 @@ export class YtDlpService {
 
           if (code !== 0) {
             logger.error(`yt-dlp extraction failed with code ${code}: ${stderr}`);
-            // Provide human-friendly error messages
             if (stderr.includes('Private video') || stderr.includes('Sign in')) {
               return reject(new Error('This video is private, age-restricted, or requires login.'));
             }
@@ -175,7 +183,6 @@ export class YtDlpService {
     const formats: VideoFormatOption[] = [];
 
     if (platform === 'youtube') {
-      // Standard video quality options
       const availableHeights = new Set<number>();
       if (Array.isArray(raw.formats)) {
         for (const f of raw.formats) {
@@ -185,7 +192,6 @@ export class YtDlpService {
         }
       }
 
-      // 1080p
       if (availableHeights.has(1080) || availableHeights.size === 0 || Math.max(...Array.from(availableHeights), 0) >= 1080) {
         formats.push({
           formatId: '1080p',
@@ -197,7 +203,6 @@ export class YtDlpService {
         });
       }
 
-      // 720p
       if (availableHeights.has(720) || availableHeights.size === 0 || Math.max(...Array.from(availableHeights), 0) >= 720) {
         formats.push({
           formatId: '720p',
@@ -209,7 +214,6 @@ export class YtDlpService {
         });
       }
 
-      // 480p
       if (availableHeights.has(480) || availableHeights.size === 0 || Math.max(...Array.from(availableHeights), 0) >= 480) {
         formats.push({
           formatId: '480p',
@@ -221,7 +225,6 @@ export class YtDlpService {
         });
       }
 
-      // 360p
       formats.push({
         formatId: '360p',
         label: '360p Low',
@@ -231,7 +234,6 @@ export class YtDlpService {
         qualityNote: 'Data saver MP4',
       });
 
-      // Audio only MP3
       formats.push({
         formatId: 'mp3',
         label: 'MP3 Audio Only',
@@ -240,7 +242,6 @@ export class YtDlpService {
         qualityNote: 'High Quality 320kbps MP3 extracted via FFmpeg',
       });
     } else {
-      // Instagram
       formats.push({
         formatId: 'best',
         label: 'Highest Quality Video',
@@ -283,13 +284,12 @@ export class YtDlpService {
     return new Promise((resolve, reject) => {
       const uniqueId = uuidv4().substring(0, 8);
       const isAudio = formatId === 'mp3' || formatId === 'audio';
-      const outputExtension = isAudio ? 'mp3' : 'mp4';
       const outputTemplate = path.join(config.tempDir, `download_${uniqueId}_%(title).50s.%(ext)s`);
 
+      const executable = this.getYtdlpExecutable();
       const args = [...this.getBaseArgs()];
 
       if (isAudio) {
-        // Extract audio and transcode to MP3 using FFmpeg
         args.push(
           '-x',
           '--audio-format', 'mp3',
@@ -298,7 +298,6 @@ export class YtDlpService {
           url
         );
       } else {
-        // Video quality selection
         let formatSelector = 'bestvideo+bestaudio/best';
         if (formatId === '1080p') {
           formatSelector = 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best';
@@ -318,13 +317,12 @@ export class YtDlpService {
         );
       }
 
-      logger.info(`Starting download: format=${formatId}, URL=${url}`);
+      logger.info(`Starting download with ${executable}: format=${formatId}, URL=${url}`);
 
-      const child = spawn(config.ytdlpPath, args, { shell: false });
+      const child = spawn(executable, args, { shell: false });
       let isSettled = false;
       let stderr = '';
 
-      // Abort signal handling
       if (abortSignal) {
         abortSignal.addEventListener('abort', () => {
           if (!isSettled) {
@@ -340,7 +338,6 @@ export class YtDlpService {
         });
       }
 
-      // Max timeout
       const timer = setTimeout(() => {
         if (!isSettled) {
           isSettled = true;
@@ -356,7 +353,6 @@ export class YtDlpService {
 
       child.stdout.on('data', (chunk) => {
         const str = chunk.toString();
-        // Parse progress if needed
         const match = str.match(/\[download\]\s+(\d+\.?\d*)%/);
         if (match && onProgress) {
           const percent = parseFloat(match[1]);
@@ -372,7 +368,7 @@ export class YtDlpService {
         if (!isSettled) {
           isSettled = true;
           clearTimeout(timer);
-          reject(new Error(`Download spawn error: ${err.message}`));
+          reject(new Error(`Download spawn error (${executable}): ${err.message}`));
         }
       });
 
@@ -386,7 +382,6 @@ export class YtDlpService {
             return reject(new Error(stderr.trim().split('\n').pop() || 'Download failed in yt-dlp'));
           }
 
-          // Locate the generated file in temp directory with prefix download_${uniqueId}
           try {
             const files = fs.readdirSync(config.tempDir);
             const targetFile = files.find((f) => f.startsWith(`download_${uniqueId}`));
